@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Simple File Transfer</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }
+    .card {
+      background: #222;
+      padding: 20px;
+      border-radius: 12px;
+      width: 320px;
+      text-align: center;
+      border: 1px solid #333;
+    }
+    input[type="file"] {
+      margin-top: 20px;
+    }
+    button {
+      margin-top: 20px;
+      padding: 10px 20px;
+      background: #4CAF50;
+      border: none;
+      color: #fff;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    #downloadLink {
+      margin-top: 20px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Simple File Transfer</h2>
+    <input type="file" id="fileInput" />
+    <button onclick="uploadFile()">Upload</button>
+    <a id="downloadLink"></a>
+  </div>
+
+  <script>
+async function uploadFile() {
+  const file = document.getElementById("fileInput").files[0];
+  if (!file) return alert("Select a file first!");
+
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch("http://localhost:3001/upload", {
+    method: "POST",
+    body: form
+  });
+
+  const data = await res.json();
+  const link = document.getElementById("downloadLink");
+  link.href = data.url;
+  link.textContent = "Download File";
+  link.style.display = "block";
+}
+</script>
+
+</body>
+</html>
