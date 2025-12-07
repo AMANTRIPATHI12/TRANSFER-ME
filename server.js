@@ -6,7 +6,7 @@ const path = require("path");
 const app = express();
 app.use(cors());
 
-// where uploaded files will be stored
+// storage location
 const storage = multer.diskStorage({
   destination: "uploads",
   filename: (req, file, cb) => {
@@ -16,13 +16,15 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-// upload endpoint
+// MAIN upload route
 app.post("/upload", upload.single("file"), (req, res) => {
-  const filePath = `http://localhost:3001/uploads/${req.file.filename}`;
-  res.json({ url: filePath });
+  const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  res.json({ url: fileUrl });
 });
 
-// serve uploads publicly
+// serve uploaded files
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-app.listen(3001, () => console.log("Server running on http://localhost:3001"));
+// Render gives PORT environment variable
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
