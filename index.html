@@ -38,54 +38,103 @@
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-const SIGNALING_SERVER = 'https://YOUR_SIGNALLING_SERVER'; // <-- change to your server
-const socket = io(SIGNALING_SERVER);
+/* ====== CONFIG ====== */
+const SIGNALING_SERVER = 'https://transfer-me-e7l9.onrender.com'; // <-- your render URL
+const CHUNK_SIZE = 64 * 1024; // 64KB
+/* ==================== */
+
+const socket = io(SIGNALING_SERVER, { transports: ['websocket', 'polling'] });
 
 let pc = null;
 let dc = null;
-let isInitiator = false;
 let roomId = null;
-const CHUNK_SIZE = 64 * 1024; // 64KB per chunk
+let amSecond = false; // if true, create offer immediately; else wait for peer-joined
 
-document.getElementById('createBtn').onclick = async () => {
-  socket.emit('create-room', (res) => {
-    roomId = res.roomId;
-    showRoom();
-    isInitiator = true;
-    initConnection();
-  });
-};
-
-document.getElementById('joinBtn').onclick = async () => {
-  const val = document.getElementById('roomInput').value.trim();
-  if (!val) return alert('paste room id or link');
-  // extract uuid if it's a link
-  const extracted = val.match(/[0-9a-fA-F-]{36}/);
-  const rid = extracted ? extracted[0] : val;
-  socket.emit('join-room', rid, (resp) => {
-    if (!resp.ok) return alert('failed to join: ' + (resp.error || ''));
-    roomId = rid;
-    showRoom();
-    isInitiator = false;
-    initConnection();
-  });
-};
-
-function showRoom(){
-  document.getElementById('roomArea').style.display = 'block';
-  document.getElementById('roomId').textContent = roomId;
-  const link = location.origin + location.pathname + '?room=' + roomId;
-  document.getElementById('status').innerHTML = `Share link: <a class="link" href="${link}" target="_blank">${link}</a>`;
+// helpers
+function el(tag, props = {}, txt) {
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  if (txt) e.textContent = txt;
+  return e;
 }
 
-function initConnection(){
+function getRoomFromUrl() {
+  const u = new URL(location.href);
+  return u.searchParams.get('room');
+}
+
+function setRoomUrl(id) {
+  const u = new URL(location.href);
+  u.searchParams.set('room', id);
+  history.replaceState({}, '', u.toString());
+}
+
+/* ---------- UI wiring ---------- */
+
+document.getElementById('createBtn').onclick = () => {
+  // generate an unguessable id and join via joinRoom flow
+  const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r-' + Math.random().toString(36).slice(2,9);
+  setRoomUrl(id);
+  joinRoom(id);
+};
+
+document.getElementById('joinBtn').onclick = () => {
+  const val = document.getElementById('roomInput').value.trim();
+  if (!val) return alert('paste room id or link');
+  const extracted = val.match(/[0-9a-fA-F-]{36}/);
+  const rid = extracted ? extracted[0] : val;
+  setRoomUrl(rid);
+  joinRoom(rid);
+};
+
+// auto-join if URL has ?room=...
+window.addEventListener('load', () => {
+  const rid = getRoomFromUrl();
+  if (rid) {
+    // populate input for clarity
+    document.getElementById('roomInput').value = rid;
+    joinRoom(rid);
+  }
+});
+
+/* ---------- Signaling & WebRTC ---------- */
+
+function joinRoom(rid) {
+  if (!rid) return;
+  roomId = rid;
+  // show UI
+  document.getElementById('roomArea').style.display = 'block';
+  document.getElementById('roomId').textContent = roomId;
+  document.getElementById('status').innerHTML = `Room <code>${roomId}</code> — Share this link: <a class="link" href="${location.href}" target="_blank">${location.href}</a>`;
+
+  initConnection(); // attach pc, handlers
+  // emit join after pc and handlers set up so signals are not missed
+  socket.emit('join-room', roomId, (resp) => {
+    if (!resp || !resp.ok) {
+      alert('Failed to join room: ' + (resp && resp.error ? resp.error : 'unknown'));
+      return;
+    }
+    // If members >= 2, we're the "second" (someone already present), so create offer immediately
+    if (resp.members >= 2) {
+      amSecond = true;
+      // create offer immediately (we are the offerer)
+      createOffer();
+    } else {
+      amSecond = false;
+      // wait for 'peer-joined' event which will trigger createOffer from the first peer
+    }
+  });
+}
+
+function initConnection() {
+  if (pc) return; // already init
   pc = new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   });
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
-      socket.emit('signal', { roomId, candidate: e.candidate });
+      socket.emit('signal', { roomId, data: { candidate: e.candidate } });
     }
   };
 
@@ -93,52 +142,70 @@ function initConnection(){
     console.log('pc state', pc.connectionState);
   };
 
-  if (isInitiator) {
-    dc = pc.createDataChannel('filetransfer');
-    setupDataChannel();
-    createOffer();
-  } else {
-    pc.ondatachannel = (ev) => {
-      dc = ev.channel;
-      setupDataChannel();
-    };
-  }
+  pc.oniceconnectionstatechange = () => {
+    console.log('ice state', pc.iceConnectionState);
+  };
 
-  // handle incoming signals
-  socket.on('signal', async ({ description, candidate }) => {
+  pc.ondatachannel = (ev) => {
+    console.log('ondatachannel', ev.channel);
+    dc = ev.channel;
+    setupDataChannel();
+  };
+
+  // listen for signaling messages relayed by server
+  socket.on('signal', async (data) => {
     try {
-      if (description) {
-        if (description.type === 'offer') {
-          await pc.setRemoteDescription(description);
-          const ans = await pc.createAnswer();
-          await pc.setLocalDescription(ans);
-          socket.emit('signal', { roomId, description: pc.localDescription });
-        } else if (description.type === 'answer') {
-          await pc.setRemoteDescription(description);
+      if (data.description) {
+        const desc = data.description;
+        if (desc.type === 'offer') {
+          await pc.setRemoteDescription(desc);
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          socket.emit('signal', { roomId, data: { description: pc.localDescription } });
+        } else if (desc.type === 'answer') {
+          await pc.setRemoteDescription(desc);
         }
-      } else if (candidate) {
-        try { await pc.addIceCandidate(candidate); } catch(e){ console.warn(e); }
+      } else if (data.candidate) {
+        try { await pc.addIceCandidate(data.candidate); } catch (err) { console.warn('addIceCandidate error', err); }
       }
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      console.error('signal handler error', err);
+    }
   });
 
-  // notify peer join
   socket.on('peer-joined', () => {
-    console.log('peer joined');
+    // someone else joined the same room
+    console.log('peer-joined event received');
+    // If we were first (amSecond=false), then we should create the offer now
+    if (!amSecond) {
+      createOffer();
+    }
   });
 
   socket.on('peer-left', () => {
-    console.log('peer left');
+    console.log('peer-left');
+    document.getElementById('status').textContent = 'Peer left';
   });
 }
 
-async function createOffer(){
+async function createOffer() {
+  if (!pc) return;
+  // create data channel if creator of offer
+  if (!dc) {
+    dc = pc.createDataChannel('filetransfer');
+    setupDataChannel();
+  }
+
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  socket.emit('signal', { roomId, description: pc.localDescription });
+  // send offer via signaling server
+  socket.emit('signal', { roomId, data: { description: pc.localDescription } });
 }
 
-function setupDataChannel(){
+/* ---------- DataChannel handling & file transfer ---------- */
+
+function setupDataChannel() {
+  if (!dc) return;
   dc.binaryType = 'arraybuffer';
 
   dc.onopen = () => {
@@ -162,7 +229,6 @@ let incomingBuffers = [];
 let incomingReceived = 0;
 
 function handleDataMessage(data){
-  // text messages carry control/metadata as JSON string
   if (typeof data === 'string') {
     try {
       const msg = JSON.parse(data);
@@ -172,7 +238,7 @@ function handleDataMessage(data){
         incomingReceived = 0;
         addReceiveRow(msg.name, msg.size);
       } else if (msg.type === 'done') {
-        // nothing extra
+        // nothing here
       }
     } catch(e){
       console.log('text', data);
@@ -183,14 +249,12 @@ function handleDataMessage(data){
   // binary chunk
   incomingBuffers.push(data);
   incomingReceived += data.byteLength;
-  updateReceiveProgress(incomingMeta.name, incomingReceived, incomingMeta.size);
+  if (incomingMeta) updateReceiveProgress(incomingMeta.name, incomingReceived, incomingMeta.size);
 
-  if (incomingReceived >= incomingMeta.size) {
-    // assemble
+  if (incomingMeta && incomingReceived >= incomingMeta.size) {
     const blob = new Blob(incomingBuffers);
     const url = URL.createObjectURL(blob);
     markReceiveComplete(incomingMeta.name, url);
-    // reset
     incomingMeta = null;
     incomingBuffers = [];
     incomingReceived = 0;
@@ -211,7 +275,6 @@ function addReceiveRow(name, size) {
 }
 
 function updateReceiveProgress(name, received, total) {
-  // find the most recent file-row for that name
   const rows = document.querySelectorAll('.file-row');
   for (const r of rows) {
     if (r.textContent.includes(name)) {
@@ -234,7 +297,8 @@ function markReceiveComplete(name, url) {
   }
 }
 
-// SENDER: send files in chunks
+/* ---------- Sending files ---------- */
+
 document.getElementById('sendBtn').onclick = async () => {
   const files = document.getElementById('fileInput').files;
   if (!files.length) return alert('Select files to send');
@@ -253,7 +317,6 @@ function sendFile(file) {
     const sliceSize = CHUNK_SIZE;
     let offset = 0;
 
-    // create UI row
     const id = 'sent-' + Math.random().toString(36).slice(2,9);
     const list = document.getElementById('list');
     const div = document.createElement('div');
@@ -270,7 +333,13 @@ function sendFile(file) {
     const reader = new FileReader();
     reader.onload = (e) => {
       const buffer = e.target.result;
-      dc.send(buffer);
+      try {
+        dc.send(buffer);
+      } catch (err) {
+        console.error('dc.send error', err);
+        reject(err);
+        return;
+      }
       offset += buffer.byteLength;
       const pct = Math.round((offset / size) * 100);
       document.getElementById(id + '-bar').style.width = pct + '%';
@@ -278,7 +347,6 @@ function sendFile(file) {
       if (offset < size) {
         readSlice(offset);
       } else {
-        // done
         dc.send(JSON.stringify({ type: 'done' }));
         document.getElementById(id + '-link').innerHTML = `<span class="muted">Sent</span>`;
         resolve();
@@ -294,7 +362,6 @@ function sendFile(file) {
       reader.readAsArrayBuffer(slice);
     }
 
-    // start
     readSlice(0);
   });
 }
