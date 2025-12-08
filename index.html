@@ -1,79 +1,303 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Simple File Transfer</title>
-
+  <meta charset="utf-8" />
+  <title>P2P File Transfer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #111;
-      color: #fff;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100vh;
-      margin: 0;
-    }
-    .card {
-      background: #222;
-      padding: 20px;
-      border-radius: 12px;
-      width: 320px;
-      text-align: center;
-      border: 1px solid #333;
-    }
-    input[type="file"] {
-      margin-top: 20px;
-    }
-    button {
-      margin-top: 20px;
-      padding: 10px 20px;
-      background: #4CAF50;
-      border: none;
-      color: #fff;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-    #downloadLink {
-      margin-top: 20px;
-      display: none;
-      color: #4CAF50;
-    }
+    body{font-family:Arial, sans-serif;background:#0f1720;color:#e6eef8;display:flex;justify-content:center;align-items:flex-start;padding:24px}
+    .card{background:#0b1220;padding:20px;border-radius:12px;width:420px;border:1px solid #1f2a37}
+    button{background:#06b6d4;border:none;color:#0b1220;padding:8px 12px;border-radius:8px;cursor:pointer;margin-right:8px}
+    input[type=file]{margin-top:12px}
+    .muted{color:#9aa8b5;font-size:13px}
+    .list{margin-top:12px}
+    .file-row{margin-top:10px;padding:8px;border-radius:8px;background:#071020}
+    .bar{height:10px;background:#06b6d4;width:0%;transition:width .12s;border-radius:6px}
+    a.link{color:#7fffd4}
   </style>
 </head>
 <body>
-
   <div class="card">
-    <h2>Simple File Transfer</h2>
-    <input type="file" id="fileInput" />
-    <button onclick="uploadFile()">Upload</button>
-    <a id="downloadLink" target="_blank"></a>
+    <h2>P2P File Transfer</h2>
+    <p class="muted">Create a room and share the link (or paste link) — receiver opens link to connect.</p>
+
+    <div style="margin-top:10px">
+      <button id="createBtn">Create Room</button>
+      <input id="roomInput" placeholder="Or paste room id / link" style="padding:8px;border-radius:8px;border:1px solid #1f2a37;background:#06101a;color:#fff;width:220px" />
+      <button id="joinBtn">Join</button>
+    </div>
+
+    <div id="roomArea" style="margin-top:12px;display:none">
+      <p class="muted">Room: <span id="roomId" style="font-family:monospace"></span></p>
+      <p><input id="fileInput" type="file" multiple /> <button id="sendBtn">Send Selected</button></p>
+      <div id="status" class="muted"></div>
+      <div id="list" class="list"></div>
+    </div>
+
   </div>
 
-  <script>
-    async function uploadFile() {
-      const file = document.getElementById("fileInput").files[0];
-      if (!file) return alert("Select a file first!");
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+const SIGNALING_SERVER = 'https://YOUR_SIGNALLING_SERVER'; // <-- change to your server
+const socket = io(SIGNALING_SERVER);
 
-      const form = new FormData();
-      form.append("file", file);
+let pc = null;
+let dc = null;
+let isInitiator = false;
+let roomId = null;
+const CHUNK_SIZE = 64 * 1024; // 64KB per chunk
 
-      const res = await fetch("https://transfer-me-e7l9.onrender.com/upload", {
-        method: "POST",
-        body: form
-      });
+document.getElementById('createBtn').onclick = async () => {
+  socket.emit('create-room', (res) => {
+    roomId = res.roomId;
+    showRoom();
+    isInitiator = true;
+    initConnection();
+  });
+};
 
-      const data = await res.json();
+document.getElementById('joinBtn').onclick = async () => {
+  const val = document.getElementById('roomInput').value.trim();
+  if (!val) return alert('paste room id or link');
+  // extract uuid if it's a link
+  const extracted = val.match(/[0-9a-fA-F-]{36}/);
+  const rid = extracted ? extracted[0] : val;
+  socket.emit('join-room', rid, (resp) => {
+    if (!resp.ok) return alert('failed to join: ' + (resp.error || ''));
+    roomId = rid;
+    showRoom();
+    isInitiator = false;
+    initConnection();
+  });
+};
 
-      const link = document.getElementById("downloadLink");
-      link.href = data.url;
-      link.textContent = "Click to Download / Share";
-      link.style.display = "block";
+function showRoom(){
+  document.getElementById('roomArea').style.display = 'block';
+  document.getElementById('roomId').textContent = roomId;
+  const link = location.origin + location.pathname + '?room=' + roomId;
+  document.getElementById('status').innerHTML = `Share link: <a class="link" href="${link}" target="_blank">${link}</a>`;
+}
+
+function initConnection(){
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('signal', { roomId, candidate: e.candidate });
     }
-  </script>
+  };
 
+  pc.onconnectionstatechange = () => {
+    console.log('pc state', pc.connectionState);
+  };
+
+  if (isInitiator) {
+    dc = pc.createDataChannel('filetransfer');
+    setupDataChannel();
+    createOffer();
+  } else {
+    pc.ondatachannel = (ev) => {
+      dc = ev.channel;
+      setupDataChannel();
+    };
+  }
+
+  // handle incoming signals
+  socket.on('signal', async ({ description, candidate }) => {
+    try {
+      if (description) {
+        if (description.type === 'offer') {
+          await pc.setRemoteDescription(description);
+          const ans = await pc.createAnswer();
+          await pc.setLocalDescription(ans);
+          socket.emit('signal', { roomId, description: pc.localDescription });
+        } else if (description.type === 'answer') {
+          await pc.setRemoteDescription(description);
+        }
+      } else if (candidate) {
+        try { await pc.addIceCandidate(candidate); } catch(e){ console.warn(e); }
+      }
+    } catch (err) { console.error(err); }
+  });
+
+  // notify peer join
+  socket.on('peer-joined', () => {
+    console.log('peer joined');
+  });
+
+  socket.on('peer-left', () => {
+    console.log('peer left');
+  });
+}
+
+async function createOffer(){
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit('signal', { roomId, description: pc.localDescription });
+}
+
+function setupDataChannel(){
+  dc.binaryType = 'arraybuffer';
+
+  dc.onopen = () => {
+    console.log('datachannel open');
+    document.getElementById('status').textContent = 'Peer connected. You can send files.';
+  };
+
+  dc.onmessage = (ev) => {
+    handleDataMessage(ev.data);
+  };
+
+  dc.onclose = () => {
+    console.log('dc closed');
+    document.getElementById('status').textContent = 'Data channel closed';
+  };
+}
+
+// Receiving side variables
+let incomingMeta = null;
+let incomingBuffers = [];
+let incomingReceived = 0;
+
+function handleDataMessage(data){
+  // text messages carry control/metadata as JSON string
+  if (typeof data === 'string') {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'meta') {
+        incomingMeta = msg;
+        incomingBuffers = [];
+        incomingReceived = 0;
+        addReceiveRow(msg.name, msg.size);
+      } else if (msg.type === 'done') {
+        // nothing extra
+      }
+    } catch(e){
+      console.log('text', data);
+    }
+    return;
+  }
+
+  // binary chunk
+  incomingBuffers.push(data);
+  incomingReceived += data.byteLength;
+  updateReceiveProgress(incomingMeta.name, incomingReceived, incomingMeta.size);
+
+  if (incomingReceived >= incomingMeta.size) {
+    // assemble
+    const blob = new Blob(incomingBuffers);
+    const url = URL.createObjectURL(blob);
+    markReceiveComplete(incomingMeta.name, url);
+    // reset
+    incomingMeta = null;
+    incomingBuffers = [];
+    incomingReceived = 0;
+  }
+}
+
+// UI helpers for receive list
+function addReceiveRow(name, size) {
+  const id = 'recv-' + Math.random().toString(36).slice(2,9);
+  const list = document.getElementById('list');
+  const div = document.createElement('div');
+  div.className = 'file-row';
+  div.id = id;
+  div.innerHTML = `<div><b>${name}</b> <span style="color:#9aa8b5">(${Math.round(size/1024/1024)} MB)</span></div>
+    <div style="margin-top:6px" class="progress"><div class="bar" id="${id}-bar"></div></div>
+    <div style="margin-top:6px" id="${id}-link"></div>`;
+  list.prepend(div);
+}
+
+function updateReceiveProgress(name, received, total) {
+  // find the most recent file-row for that name
+  const rows = document.querySelectorAll('.file-row');
+  for (const r of rows) {
+    if (r.textContent.includes(name)) {
+      const bar = r.querySelector('.bar');
+      bar.style.width = Math.round(received/total * 100) + '%';
+      break;
+    }
+  }
+}
+
+function markReceiveComplete(name, url) {
+  const rows = document.querySelectorAll('.file-row');
+  for (const r of rows) {
+    if (r.textContent.includes(name)) {
+      const linkArea = r.querySelector('[id$="-link"]');
+      linkArea.innerHTML = `<a class="link" href="${url}" download="${name}">Download ${name}</a>`;
+      r.querySelector('.bar').style.width = '100%';
+      break;
+    }
+  }
+}
+
+// SENDER: send files in chunks
+document.getElementById('sendBtn').onclick = async () => {
+  const files = document.getElementById('fileInput').files;
+  if (!files.length) return alert('Select files to send');
+  if (!dc || dc.readyState !== 'open') return alert('No peer connected yet');
+
+  for (let f of files) {
+    await sendFile(f);
+  }
+  alert('All files sent.');
+};
+
+function sendFile(file) {
+  return new Promise((resolve, reject) => {
+    const name = file.name;
+    const size = file.size;
+    const sliceSize = CHUNK_SIZE;
+    let offset = 0;
+
+    // create UI row
+    const id = 'sent-' + Math.random().toString(36).slice(2,9);
+    const list = document.getElementById('list');
+    const div = document.createElement('div');
+    div.className = 'file-row';
+    div.id = id;
+    div.innerHTML = `<div><b>${name}</b> <span style="color:#9aa8b5">(${Math.round(size/1024/1024)} MB)</span></div>
+      <div style="margin-top:6px" class="progress"><div class="bar" id="${id}-bar"></div></div>
+      <div style="margin-top:6px" id="${id}-link"></div>`;
+    list.prepend(div);
+
+    // send metadata first
+    dc.send(JSON.stringify({ type: 'meta', name, size, chunkSize: sliceSize }));
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const buffer = e.target.result;
+      dc.send(buffer);
+      offset += buffer.byteLength;
+      const pct = Math.round((offset / size) * 100);
+      document.getElementById(id + '-bar').style.width = pct + '%';
+
+      if (offset < size) {
+        readSlice(offset);
+      } else {
+        // done
+        dc.send(JSON.stringify({ type: 'done' }));
+        document.getElementById(id + '-link').innerHTML = `<span class="muted">Sent</span>`;
+        resolve();
+      }
+    };
+
+    reader.onerror = (err) => {
+      reject(err);
+    };
+
+    function readSlice(o) {
+      const slice = file.slice(o, o + sliceSize);
+      reader.readAsArrayBuffer(slice);
+    }
+
+    // start
+    readSlice(0);
+  });
+}
+</script>
 </body>
 </html>
