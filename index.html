@@ -3,29 +3,27 @@
 <head>
   <title>File Share</title>
   <style>
-    body { 
-      background:#0f1720; 
-      color:white; 
-      font-family:Arial; 
-      padding:40px;
-    }
-    .box { 
-      background:#0b1220; 
-      padding:20px; 
-      border-radius:12px; 
-      width:400px; 
-      border:1px solid #1f2a37;
-    }
-    button {
-      background:#06b6d4;
-      padding:10px 15px;
-      color:#0b1220;
-      border-radius:8px;
-      border:none;
-      cursor:pointer;
-    }
+    body { background:#0f1720; color:white; font-family:Arial; padding:40px; }
+    .box { background:#0b1220; padding:20px; border-radius:12px; width:400px; border:1px solid #1f2a37; }
+    button { background:#06b6d4; padding:10px 15px; color:#0b1220; border-radius:8px; border:none; cursor:pointer; }
     input[type=file] { margin-top:14px; }
     a.link { color:#7fffd4; }
+
+    #progressBar {
+      width: 100%;
+      height: 10px;
+      background: #1d2939;
+      margin-top: 10px;
+      border-radius: 6px;
+      overflow:hidden;
+      display:none;
+    }
+    #progressBar div {
+      height: 100%;
+      width: 0%;
+      background:#06b6d4;
+      transition: 0.2s;
+    }
   </style>
 </head>
 
@@ -36,6 +34,8 @@
     <input type="file" id="fileInput" />
     <button onclick="uploadFile()">Upload</button>
 
+    <div id="progressBar"><div></div></div>
+
     <p id="status"></p>
     <p id="link"></p>
   </div>
@@ -44,24 +44,34 @@
 async function uploadFile() {
   const f = document.getElementById("fileInput").files[0];
   if (!f) return alert("Choose a file first!");
+  if (f.size > 2 * 1024 * 1024 * 1024) return alert("Max file size = 2 GB");
 
   const form = new FormData();
   form.append("file", f);
 
   document.getElementById("status").textContent = "Uploading...";
+  document.getElementById("progressBar").style.display = "block";
 
-  const res = await fetch("http://localhost:3001/upload", {
-    method: "POST",
-    body: form
-  });
+  const xhr = new XMLHttpRequest();
 
-  const data = await res.json();
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable) {
+      const percent = (e.loaded / e.total) * 100;
+      document.querySelector("#progressBar div").style.width = percent + "%";
+    }
+  };
 
-  if (data.success) {
-    document.getElementById("status").textContent = "Uploaded!";
-    document.getElementById("link").innerHTML =
-      `<a class="link" href="${data.link}" target="_blank">${data.link}</a>`;
-  }
+  xhr.onload = () => {
+    const data = JSON.parse(xhr.responseText);
+    if (data.success) {
+      document.getElementById("status").textContent = "Uploaded!";
+      document.getElementById("link").innerHTML =
+        `<a class="link" href="${data.link}" target="_blank">${data.link}</a>`;
+    }
+  };
+
+  xhr.open("POST", "http://localhost:3001/upload");
+  xhr.send(form);
 }
 </script>
 </body>
