@@ -1,369 +1,67 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <title>P2P File Transfer</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>File Share</title>
   <style>
-    body{font-family:Arial, sans-serif;background:#0f1720;color:#e6eef8;display:flex;justify-content:center;align-items:flex-start;padding:24px}
-    .card{background:#0b1220;padding:20px;border-radius:12px;width:420px;border:1px solid #1f2a37}
-    button{background:#06b6d4;border:none;color:#0b1220;padding:8px 12px;border-radius:8px;cursor:pointer;margin-right:8px}
-    input[type=file]{margin-top:12px}
-    .muted{color:#9aa8b5;font-size:13px}
-    .list{margin-top:12px}
-    .file-row{margin-top:10px;padding:8px;border-radius:8px;background:#071020}
-    .bar{height:10px;background:#06b6d4;width:0%;transition:width .12s;border-radius:6px}
-    a.link{color:#7fffd4}
+    body { 
+      background:#0f1720; 
+      color:white; 
+      font-family:Arial; 
+      padding:40px;
+    }
+    .box { 
+      background:#0b1220; 
+      padding:20px; 
+      border-radius:12px; 
+      width:400px; 
+      border:1px solid #1f2a37;
+    }
+    button {
+      background:#06b6d4;
+      padding:10px 15px;
+      color:#0b1220;
+      border-radius:8px;
+      border:none;
+      cursor:pointer;
+    }
+    input[type=file] { margin-top:14px; }
+    a.link { color:#7fffd4; }
   </style>
 </head>
+
 <body>
-  <div class="card">
-    <h2>P2P File Transfer</h2>
-    <p class="muted">Create a room and share the link (or paste link) — receiver opens link to connect.</p>
+  <div class="box">
+    <h2>Upload & Share</h2>
 
-    <div style="margin-top:10px">
-      <button id="createBtn">Create Room</button>
-      <input id="roomInput" placeholder="Or paste room id / link" style="padding:8px;border-radius:8px;border:1px solid #1f2a37;background:#06101a;color:#fff;width:220px" />
-      <button id="joinBtn">Join</button>
-    </div>
+    <input type="file" id="fileInput" />
+    <button onclick="uploadFile()">Upload</button>
 
-    <div id="roomArea" style="margin-top:12px;display:none">
-      <p class="muted">Room: <span id="roomId" style="font-family:monospace"></span></p>
-      <p><input id="fileInput" type="file" multiple /> <button id="sendBtn">Send Selected</button></p>
-      <div id="status" class="muted"></div>
-      <div id="list" class="list"></div>
-    </div>
-
+    <p id="status"></p>
+    <p id="link"></p>
   </div>
 
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-/* ====== CONFIG ====== */
-const SIGNALING_SERVER = 'https://transfer-me-e7l9.onrender.com'; // <-- your render URL
-const CHUNK_SIZE = 64 * 1024; // 64KB
-/* ==================== */
+async function uploadFile() {
+  const f = document.getElementById("fileInput").files[0];
+  if (!f) return alert("Choose a file first!");
 
-const socket = io(SIGNALING_SERVER, { transports: ['websocket', 'polling'] });
+  const form = new FormData();
+  form.append("file", f);
 
-let pc = null;
-let dc = null;
-let roomId = null;
-let amSecond = false; // if true, create offer immediately; else wait for peer-joined
+  document.getElementById("status").textContent = "Uploading...";
 
-// helpers
-function el(tag, props = {}, txt) {
-  const e = document.createElement(tag);
-  Object.assign(e, props);
-  if (txt) e.textContent = txt;
-  return e;
-}
-
-function getRoomFromUrl() {
-  const u = new URL(location.href);
-  return u.searchParams.get('room');
-}
-
-function setRoomUrl(id) {
-  const u = new URL(location.href);
-  u.searchParams.set('room', id);
-  history.replaceState({}, '', u.toString());
-}
-
-/* ---------- UI wiring ---------- */
-
-document.getElementById('createBtn').onclick = () => {
-  // generate an unguessable id and join via joinRoom flow
-  const id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : 'r-' + Math.random().toString(36).slice(2,9);
-  setRoomUrl(id);
-  joinRoom(id);
-};
-
-document.getElementById('joinBtn').onclick = () => {
-  const val = document.getElementById('roomInput').value.trim();
-  if (!val) return alert('paste room id or link');
-  const extracted = val.match(/[0-9a-fA-F-]{36}/);
-  const rid = extracted ? extracted[0] : val;
-  setRoomUrl(rid);
-  joinRoom(rid);
-};
-
-// auto-join if URL has ?room=...
-window.addEventListener('load', () => {
-  const rid = getRoomFromUrl();
-  if (rid) {
-    // populate input for clarity
-    document.getElementById('roomInput').value = rid;
-    joinRoom(rid);
-  }
-});
-
-/* ---------- Signaling & WebRTC ---------- */
-
-function joinRoom(rid) {
-  if (!rid) return;
-  roomId = rid;
-  // show UI
-  document.getElementById('roomArea').style.display = 'block';
-  document.getElementById('roomId').textContent = roomId;
-  document.getElementById('status').innerHTML = `Room <code>${roomId}</code> — Share this link: <a class="link" href="${location.href}" target="_blank">${location.href}</a>`;
-
-  initConnection(); // attach pc, handlers
-  // emit join after pc and handlers set up so signals are not missed
-  socket.emit('join-room', roomId, (resp) => {
-    if (!resp || !resp.ok) {
-      alert('Failed to join room: ' + (resp && resp.error ? resp.error : 'unknown'));
-      return;
-    }
-    // If members >= 2, we're the "second" (someone already present), so create offer immediately
-    if (resp.members >= 2) {
-      amSecond = true;
-      // create offer immediately (we are the offerer)
-      createOffer();
-    } else {
-      amSecond = false;
-      // wait for 'peer-joined' event which will trigger createOffer from the first peer
-    }
-  });
-}
-
-function initConnection() {
-  if (pc) return; // already init
-  pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  const res = await fetch("http://localhost:3001/upload", {
+    method: "POST",
+    body: form
   });
 
-  pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      socket.emit('signal', { roomId, data: { candidate: e.candidate } });
-    }
-  };
+  const data = await res.json();
 
-  pc.onconnectionstatechange = () => {
-    console.log('pc state', pc.connectionState);
-  };
-
-  pc.oniceconnectionstatechange = () => {
-    console.log('ice state', pc.iceConnectionState);
-  };
-
-  pc.ondatachannel = (ev) => {
-    console.log('ondatachannel', ev.channel);
-    dc = ev.channel;
-    setupDataChannel();
-  };
-
-  // listen for signaling messages relayed by server
-  socket.on('signal', async (data) => {
-    try {
-      if (data.description) {
-        const desc = data.description;
-        if (desc.type === 'offer') {
-          await pc.setRemoteDescription(desc);
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          socket.emit('signal', { roomId, data: { description: pc.localDescription } });
-        } else if (desc.type === 'answer') {
-          await pc.setRemoteDescription(desc);
-        }
-      } else if (data.candidate) {
-        try { await pc.addIceCandidate(data.candidate); } catch (err) { console.warn('addIceCandidate error', err); }
-      }
-    } catch (err) {
-      console.error('signal handler error', err);
-    }
-  });
-
-  socket.on('peer-joined', () => {
-    // someone else joined the same room
-    console.log('peer-joined event received');
-    // If we were first (amSecond=false), then we should create the offer now
-    if (!amSecond) {
-      createOffer();
-    }
-  });
-
-  socket.on('peer-left', () => {
-    console.log('peer-left');
-    document.getElementById('status').textContent = 'Peer left';
-  });
-}
-
-async function createOffer() {
-  if (!pc) return;
-  // create data channel if creator of offer
-  if (!dc) {
-    dc = pc.createDataChannel('filetransfer');
-    setupDataChannel();
+  if (data.success) {
+    document.getElementById("status").textContent = "Uploaded!";
+    document.getElementById("link").innerHTML =
+      `<a class="link" href="${data.link}" target="_blank">${data.link}</a>`;
   }
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  // send offer via signaling server
-  socket.emit('signal', { roomId, data: { description: pc.localDescription } });
-}
-
-/* ---------- DataChannel handling & file transfer ---------- */
-
-function setupDataChannel() {
-  if (!dc) return;
-  dc.binaryType = 'arraybuffer';
-
-  dc.onopen = () => {
-    console.log('datachannel open');
-    document.getElementById('status').textContent = 'Peer connected. You can send files.';
-  };
-
-  dc.onmessage = (ev) => {
-    handleDataMessage(ev.data);
-  };
-
-  dc.onclose = () => {
-    console.log('dc closed');
-    document.getElementById('status').textContent = 'Data channel closed';
-  };
-}
-
-// Receiving side variables
-let incomingMeta = null;
-let incomingBuffers = [];
-let incomingReceived = 0;
-
-function handleDataMessage(data){
-  if (typeof data === 'string') {
-    try {
-      const msg = JSON.parse(data);
-      if (msg.type === 'meta') {
-        incomingMeta = msg;
-        incomingBuffers = [];
-        incomingReceived = 0;
-        addReceiveRow(msg.name, msg.size);
-      } else if (msg.type === 'done') {
-        // nothing here
-      }
-    } catch(e){
-      console.log('text', data);
-    }
-    return;
-  }
-
-  // binary chunk
-  incomingBuffers.push(data);
-  incomingReceived += data.byteLength;
-  if (incomingMeta) updateReceiveProgress(incomingMeta.name, incomingReceived, incomingMeta.size);
-
-  if (incomingMeta && incomingReceived >= incomingMeta.size) {
-    const blob = new Blob(incomingBuffers);
-    const url = URL.createObjectURL(blob);
-    markReceiveComplete(incomingMeta.name, url);
-    incomingMeta = null;
-    incomingBuffers = [];
-    incomingReceived = 0;
-  }
-}
-
-// UI helpers for receive list
-function addReceiveRow(name, size) {
-  const id = 'recv-' + Math.random().toString(36).slice(2,9);
-  const list = document.getElementById('list');
-  const div = document.createElement('div');
-  div.className = 'file-row';
-  div.id = id;
-  div.innerHTML = `<div><b>${name}</b> <span style="color:#9aa8b5">(${Math.round(size/1024/1024)} MB)</span></div>
-    <div style="margin-top:6px" class="progress"><div class="bar" id="${id}-bar"></div></div>
-    <div style="margin-top:6px" id="${id}-link"></div>`;
-  list.prepend(div);
-}
-
-function updateReceiveProgress(name, received, total) {
-  const rows = document.querySelectorAll('.file-row');
-  for (const r of rows) {
-    if (r.textContent.includes(name)) {
-      const bar = r.querySelector('.bar');
-      bar.style.width = Math.round(received/total * 100) + '%';
-      break;
-    }
-  }
-}
-
-function markReceiveComplete(name, url) {
-  const rows = document.querySelectorAll('.file-row');
-  for (const r of rows) {
-    if (r.textContent.includes(name)) {
-      const linkArea = r.querySelector('[id$="-link"]');
-      linkArea.innerHTML = `<a class="link" href="${url}" download="${name}">Download ${name}</a>`;
-      r.querySelector('.bar').style.width = '100%';
-      break;
-    }
-  }
-}
-
-/* ---------- Sending files ---------- */
-
-document.getElementById('sendBtn').onclick = async () => {
-  const files = document.getElementById('fileInput').files;
-  if (!files.length) return alert('Select files to send');
-  if (!dc || dc.readyState !== 'open') return alert('No peer connected yet');
-
-  for (let f of files) {
-    await sendFile(f);
-  }
-  alert('All files sent.');
-};
-
-function sendFile(file) {
-  return new Promise((resolve, reject) => {
-    const name = file.name;
-    const size = file.size;
-    const sliceSize = CHUNK_SIZE;
-    let offset = 0;
-
-    const id = 'sent-' + Math.random().toString(36).slice(2,9);
-    const list = document.getElementById('list');
-    const div = document.createElement('div');
-    div.className = 'file-row';
-    div.id = id;
-    div.innerHTML = `<div><b>${name}</b> <span style="color:#9aa8b5">(${Math.round(size/1024/1024)} MB)</span></div>
-      <div style="margin-top:6px" class="progress"><div class="bar" id="${id}-bar"></div></div>
-      <div style="margin-top:6px" id="${id}-link"></div>`;
-    list.prepend(div);
-
-    // send metadata first
-    dc.send(JSON.stringify({ type: 'meta', name, size, chunkSize: sliceSize }));
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const buffer = e.target.result;
-      try {
-        dc.send(buffer);
-      } catch (err) {
-        console.error('dc.send error', err);
-        reject(err);
-        return;
-      }
-      offset += buffer.byteLength;
-      const pct = Math.round((offset / size) * 100);
-      document.getElementById(id + '-bar').style.width = pct + '%';
-
-      if (offset < size) {
-        readSlice(offset);
-      } else {
-        dc.send(JSON.stringify({ type: 'done' }));
-        document.getElementById(id + '-link').innerHTML = `<span class="muted">Sent</span>`;
-        resolve();
-      }
-    };
-
-    reader.onerror = (err) => {
-      reject(err);
-    };
-
-    function readSlice(o) {
-      const slice = file.slice(o, o + sliceSize);
-      reader.readAsArrayBuffer(slice);
-    }
-
-    readSlice(0);
-  });
 }
 </script>
 </body>

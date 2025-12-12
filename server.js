@@ -1,60 +1,66 @@
-// server.js
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const { v4: uuidv4 } = require('uuid');
-const cors = require('cors');
+const express = require("express");
+const multer = require("multer");
+const { MongoClient } = require("mongodb");
+const { v4: uuid } = require("uuid");
+const fs = require("fs");
+const cors = require("cors");
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
 
-io.on('connection', socket => {
-  console.log('socket connected', socket.id);
+const upload = multer({ dest: "uploads/" });
 
-  // legacy create-room kept for compatibility (but client now does join-room normally)
-  socket.on('create-room', (cb) => {
-    const roomId = uuidv4();
-    socket.join(roomId);
-    console.log(`${socket.id} created room ${roomId}`);
-    if (cb) cb({ roomId });
+let db;
+
+// connect to MongoDB
+async function startDB() {
+  const client = new MongoClient(process.env.MONGO_URI);
+  await client.connect();
+  db = client.db("fileShareDB");
+  console.log("MongoDB connected");
+}
+startDB();
+
+// upload endpoint
+app.post("/upload", upload.single("file"), async (req, res) => {
+  const file = req.file;
+  const fileId = uuid();
+
+  const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+
+  await db.collection("files").insertOne({
+    fileId,
+    originalName: file.originalname,
+    path: file.path,
+    expiresAt
   });
 
-  // join-room: always join (don't reject). Notify others that someone joined.
-  socket.on('join-room', (roomId, cb) => {
-    try {
-      socket.join(roomId);
-      const room = io.sockets.adapter.rooms.get(roomId);
-      const members = room ? room.size : 0;
-      console.log(`${socket.id} joined ${roomId} (members=${members})`);
-      // notify the other peer(s) that someone joined
-      socket.to(roomId).emit('peer-joined', { id: socket.id });
-      if (cb) cb({ ok: true, members });
-    } catch (err) {
-      console.error('join-room error', err);
-      if (cb) cb({ ok: false, error: err.message });
-    }
-  });
+  const link = `${process.env.BASE_URL}/file/${fileId}`;
 
-  // relay signaling messages to everyone else in the room
-  socket.on('signal', ({ roomId, data }) => {
-    // data can be { description } or { candidate }
-    socket.to(roomId).emit('signal', data);
-  });
-
-  socket.on('disconnecting', () => {
-    const rooms = [...socket.rooms].filter(r => r !== socket.id);
-    rooms.forEach(r => {
-      socket.to(r).emit('peer-left', { id: socket.id });
-      console.log(`${socket.id} leaving room ${r}`);
-    });
-  });
-
-  socket.on('disconnect', () => {
-    console.log('socket disconnected', socket.id);
-  });
+  res.json({ success: true, link });
 });
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`Signaling server listening on ${PORT}`));
+// download endpoint
+app.get("/file/:id", async (req, res) => {
+  const file = await db.collection("files").findOne({ fileId: req.params.id });
+
+  if (!file) return res.status(404).send("File expired or not found");
+
+  res.download(file.path, file.originalName);
+});
+
+// auto-delete expired files every hour
+setInterval(async () => {
+  const now = Date.now();
+  const expired = await db.collection("files").find({ expiresAt: { $lt: now } }).toArray();
+
+  expired.forEach(file => {
+    if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+  });
+
+  await db.collection("files").deleteMany({ expiresAt: { $lt: now } });
+  console.log("Expired files cleaned.");
+}, 60 * 60 * 1000);
+
+app.listen(3001, () => console.log("Server running on port 3001"));
