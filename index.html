@@ -1,78 +1,136 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>File Share</title>
-  <style>
-    body { background:#0f1720; color:white; font-family:Arial; padding:40px; }
-    .box { background:#0b1220; padding:20px; border-radius:12px; width:400px; border:1px solid #1f2a37; }
-    button { background:#06b6d4; padding:10px 15px; color:#0b1220; border-radius:8px; border:none; cursor:pointer; }
-    input[type=file] { margin-top:14px; }
-    a.link { color:#7fffd4; }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Transfer Me</title>
 
-    #progressBar {
-      width: 100%;
-      height: 10px;
-      background: #1d2939;
-      margin-top: 10px;
-      border-radius: 6px;
-      overflow:hidden;
-      display:none;
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
     }
-    #progressBar div {
+    .card {
+      background: #222;
+      padding: 20px;
+      border-radius: 12px;
+      width: 360px;
+      border: 1px solid #333;
+    }
+    h2 {
+      text-align: center;
+    }
+    input[type="file"] {
+      margin-top: 15px;
+    }
+    button {
+      margin-top: 15px;
+      width: 100%;
+      padding: 10px;
+      background: #4CAF50;
+      border: none;
+      color: #fff;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 15px;
+    }
+    .file-container {
+      margin-top: 20px;
+    }
+    .file {
+      margin-bottom: 15px;
+    }
+    .progress-container {
+      width: 100%;
+      background: #333;
+      border-radius: 5px;
+      height: 8px;
+      margin-top: 5px;
+      overflow: hidden;
+    }
+    .progress-bar {
       height: 100%;
       width: 0%;
-      background:#06b6d4;
-      transition: 0.2s;
+      background: #4CAF50;
+      transition: width 0.2s;
+    }
+    .download-link {
+      color: #4CAF50;
+      font-size: 14px;
+      margin-top: 5px;
+      display: none;
     }
   </style>
 </head>
 
 <body>
-  <div class="box">
-    <h2>Upload & Share</h2>
+  <div class="card">
+    <h2>Transfer Me</h2>
 
-    <input type="file" id="fileInput" />
-    <button onclick="uploadFile()">Upload</button>
+    <input type="file" id="fileInput" multiple />
+    <button onclick="uploadFiles()">Upload</button>
 
-    <div id="progressBar"><div></div></div>
-
-    <p id="status"></p>
-    <p id="link"></p>
+    <div id="fileList" class="file-container"></div>
   </div>
 
 <script>
-async function uploadFile() {
-  const f = document.getElementById("fileInput").files[0];
-  if (!f) return alert("Choose a file first!");
-  if (f.size > 2 * 1024 * 1024 * 1024) return alert("Max file size = 2 GB");
+  const API = "https://transfer-me-e7l9.onrender.com/upload";
 
-  const form = new FormData();
-  form.append("file", f);
+  function uploadFiles() {
+    const files = document.getElementById("fileInput").files;
+    if (!files.length) return alert("Select files first");
 
-  document.getElementById("status").textContent = "Uploading...";
-  document.getElementById("progressBar").style.display = "block";
+    const list = document.getElementById("fileList");
+    list.innerHTML = "";
 
-  const xhr = new XMLHttpRequest();
+    [...files].forEach((file, index) => {
+      const div = document.createElement("div");
+      div.className = "file";
+      div.innerHTML = `
+        <div>${file.name}</div>
+        <div class="progress-container">
+          <div class="progress-bar" id="bar-${index}"></div>
+        </div>
+        <a class="download-link" id="link-${index}" target="_blank">Download / Share</a>
+      `;
+      list.appendChild(div);
 
-  xhr.upload.onprogress = (e) => {
-    if (e.lengthComputable) {
-      const percent = (e.loaded / e.total) * 100;
-      document.querySelector("#progressBar div").style.width = percent + "%";
-    }
-  };
+      uploadSingle(file, index);
+    });
+  }
 
-  xhr.onload = () => {
-    const data = JSON.parse(xhr.responseText);
-    if (data.success) {
-      document.getElementById("status").textContent = "Uploaded!";
-      document.getElementById("link").innerHTML =
-        `<a class="link" href="${data.link}" target="_blank">${data.link}</a>`;
-    }
-  };
+  function uploadSingle(file, index) {
+    const form = new FormData();
+    form.append("file", file);
 
-  xhr.open("POST", "http://localhost:3001/upload");
-  xhr.send(form);
-}
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const percent = (e.loaded / e.total) * 100;
+        document.getElementById(`bar-${index}`).style.width = percent + "%";
+      }
+    };
+
+    xhr.onload = () => {
+      if (xhr.status === 200) {
+        const res = JSON.parse(xhr.responseText);
+        const link = document.getElementById(`link-${index}`);
+        link.href = res.url;
+        link.style.display = "block";
+        document.getElementById(`bar-${index}`).style.width = "100%";
+      }
+    };
+
+    xhr.open("POST", API);
+    xhr.send(form);
+  }
 </script>
 </body>
 </html>
