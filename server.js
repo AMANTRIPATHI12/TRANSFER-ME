@@ -29,7 +29,7 @@ const normalStorage = multer.diskStorage({
 
 const normalUpload = multer({
   storage: normalStorage,
-  limits: { fileSize: 500 * 1024 * 1024 }
+  limits: { fileSize: 500 * 1024 * 1024 } // 500MB
 });
 
 app.post("/upload", normalUpload.single("file"), (req, res) => {
@@ -43,9 +43,7 @@ app.post("/upload", normalUpload.single("file"), (req, res) => {
 // CHUNKED UPLOAD (LARGE FILES)
 // =======================
 const chunkStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, CHUNKS_DIR);
-  },
+  destination: CHUNKS_DIR,
   filename: (req, file, cb) => {
     cb(null, `${Date.now()}-${file.originalname}`);
   }
@@ -66,32 +64,35 @@ app.post("/chunk", chunkUpload.single("chunk"), (req, res) => {
   const chunkFolder = path.join(CHUNKS_DIR, fileId);
   if (!fs.existsSync(chunkFolder)) fs.mkdirSync(chunkFolder);
 
-  const chunkPath = path.join(chunkFolder, index);
+  const chunkPath = path.join(chunkFolder, String(index));
   fs.renameSync(req.file.path, chunkPath);
 
-  // Merge if last chunk
+  // Merge when last chunk arrives
   if (Number(index) + 1 === Number(total)) {
-  const finalName = `${Date.now()}-${name}`;
-  const finalFile = path.join(UPLOADS_DIR, finalName);
-  const writeStream = fs.createWriteStream(finalFile);
+    const finalName = `${Date.now()}-${name}`;
+    const finalFile = path.join(UPLOADS_DIR, finalName);
+    const writeStream = fs.createWriteStream(finalFile);
 
-  for (let i = 0; i < total; i++) {
-    const chunkData = fs.readFileSync(path.join(chunkFolder, String(i)));
-    writeStream.write(chunkData);
+    for (let i = 0; i < total; i++) {
+      const chunkData = fs.readFileSync(path.join(chunkFolder, String(i)));
+      writeStream.write(chunkData);
+    }
+
+    writeStream.end();
+
+    writeStream.on("finish", () => {
+      fs.rmSync(chunkFolder, { recursive: true, force: true });
+
+      const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${finalName}`;
+      res.json({ done: true, url: fileUrl });
+    });
+
+    return;
   }
 
-  writeStream.end();
-
-  writeStream.on("finish", () => {
-    fs.rmSync(chunkFolder, { recursive: true, force: true });
-
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${finalName}`;
-    res.json({ done: true, url: fileUrl });
-  });
-
-  return;
-}
-
+  // Not last chunk
+  res.json({ received: true });
+});
 
 // =======================
 // STATIC FILE SERVE
