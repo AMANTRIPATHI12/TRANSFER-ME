@@ -71,25 +71,27 @@ app.post("/chunk", chunkUpload.single("chunk"), (req, res) => {
 
   // Merge if last chunk
   if (Number(index) + 1 === Number(total)) {
-    const finalFile = path.join(UPLOADS_DIR, `${Date.now()}-${name}`);
-    const writeStream = fs.createWriteStream(finalFile);
+  const finalName = `${Date.now()}-${name}`;
+  const finalFile = path.join(UPLOADS_DIR, finalName);
+  const writeStream = fs.createWriteStream(finalFile);
 
-    for (let i = 0; i < total; i++) {
-      const chunkData = fs.readFileSync(path.join(chunkFolder, String(i)));
-      writeStream.write(chunkData);
-    }
-
-    writeStream.end();
-    writeStream.on("close", () => {
-      fs.rmSync(chunkFolder, { recursive: true, force: true });
-    });
-
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${path.basename(finalFile)}`;
-    return res.json({ done: true, url: fileUrl });
+  for (let i = 0; i < total; i++) {
+    const chunkData = fs.readFileSync(path.join(chunkFolder, String(i)));
+    writeStream.write(chunkData);
   }
 
-  res.json({ received: true });
-});
+  writeStream.end();
+
+  writeStream.on("finish", () => {
+    fs.rmSync(chunkFolder, { recursive: true, force: true });
+
+    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${finalName}`;
+    res.json({ done: true, url: fileUrl });
+  });
+
+  return;
+}
+
 
 // =======================
 // STATIC FILE SERVE
