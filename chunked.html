@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chunked Upload</title>
+
+<style>
+body {
+  background:#111;
+  color:#fff;
+  font-family: Arial, sans-serif;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  height:100vh;
+  margin:0;
+}
+.card {
+  background:#222;
+  padding:20px;
+  border-radius:12px;
+  width:360px;
+  border:1px solid #333;
+}
+.progress {
+  height:8px;
+  background:#333;
+  border-radius:5px;
+  margin-top:10px;
+}
+.bar {
+  height:100%;
+  width:0%;
+  background:#2196F3;
+  border-radius:5px;
+}
+a { color:#4CAF50; }
+</style>
+</head>
+
+<body>
+<div class="card">
+  <h2>Chunked Upload</h2>
+  <input type="file" id="file" />
+  <button onclick="startUpload()">Upload</button>
+
+  <div class="progress">
+    <div class="bar" id="bar"></div>
+  </div>
+
+  <p id="status"></p>
+  <a id="link" target="_blank"></a>
+</div>
+
+<script>
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+const API = "https://transfer-me-e7l9.onrender.com/chunk";
+
+async function startUpload() {
+  const file = document.getElementById("file").files[0];
+  if (!file) return alert("Select file");
+
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  const fileId = Date.now() + "-" + file.name;
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const chunk = file.slice(start, end);
+
+    const form = new FormData();
+    form.append("chunk", chunk);
+    form.append("fileId", fileId);
+    form.append("index", i);
+    form.append("total", totalChunks);
+    form.append("name", file.name);
+
+    await fetch(API, { method: "POST", body: form });
+
+    document.getElementById("bar").style.width =
+      Math.round(((i + 1) / totalChunks) * 100) + "%";
+  }
+
+  document.getElementById("status").textContent = "Upload complete";
+  document.getElementById("link").href =
+    `https://transfer-me-e7l9.onrender.com/uploads/${fileId}`;
+  document.getElementById("link").textContent = "Download File";
+}
+</script>
+</body>
+</html>
